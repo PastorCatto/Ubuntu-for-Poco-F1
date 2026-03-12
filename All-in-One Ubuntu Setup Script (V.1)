@@ -1,0 +1,209 @@
+cat << 'DEPLOY_EOF' > deploy_workspace.sh
+#!/bin/bash
+echo "======================================================="
+echo "   Beryllium ROM Cooker - Heisenberg Edition"
+echo "======================================================="
+
+# --- Engine Detection ---
+if command -v docker >/dev/null 2>&1; then
+    ENGINE="docker"
+elif command -v podman >/dev/null 2>&1; then
+    ENGINE="podman"
+else
+    echo "[ERROR] No container engine (Docker or Podman) found!"
+    exit 1
+fi
+
+# --- Configuration Prompts ---
+read -p "Enter desired username [default: ubuntu]: " USERNAME
+USERNAME=${USERNAME:-ubuntu}
+
+read -s -p "Enter desired password [default: ubuntu]: " PASSWORD
+echo ""
+PASSWORD=${PASSWORD:-ubuntu}
+
+echo "Select Desktop UI:"
+echo "1) Lomiri (Ubuntu Touch experience)"
+echo "2) XFCE (Lightweight, best for performance)"
+echo "3) GNOME (Modern, heavy, tablet-friendly)"
+echo "4) Custom (Provide your own package names)"
+read -p "Choice [1-4, default 1]: " UI_CHOICE
+
+case $UI_CHOICE in
+    2) UI_PKG="xfce4 xfce4-goodies xorg"; UI_NAME="xfce" ;;
+    3) UI_PKG="ubuntu-desktop-minimal"; UI_NAME="gnome" ;;
+    4) 
+       read -p "Enter full package name(s) (e.g., kde-standard): " CUSTOM_PKG
+       UI_PKG="$CUSTOM_PKG xorg lightdm"
+       UI_NAME="custom"
+       ;;
+    *) UI_PKG="lomiri-desktop-session mir-graphics-drivers-desktop"; UI_NAME="lomiri" ;;
+esac
+
+echo ">>> Configuration: User '$USERNAME' | UI: '$UI_NAME' | Engine: '$ENGINE'"
+echo "======================================================="
+
+# 1. Generate Dockerfile
+cat << 'EOF' > Dockerfile
+FROM ubuntu:24.04
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y \
+    debootstrap qemu-user-static sudo e2fsprogs \
+    curl wget xz-utils gzip ca-certificates \
+    android-sdk-libsparse-utils file fdisk \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /cooker
+COPY cook_beryllium.sh .
+RUN chmod +x cook_beryllium.sh
+CMD ["sleep", "infinity"]
+EOF
+
+# 2. Generate cook_beryllium.sh
+cat << EOF > cook_beryllium.sh
+#!/bin/bash
+set -e
+
+# --- The Cook Is Here ---
+cat << "ART_EOF"
+⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⡿⠿⠿⠿⠿⢿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿
+⣿⣿⣿⣿⣿⣿⣿⣿⠟⠋⠁⠀⠀⠀⠀⠀⠀⠀⠀⠉⠻⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿
+⣿⣿⣿⣿⣿⣿⣿⠁⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢺⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿
+⣿⣿⣿⣿⣿⣿⣿⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠆⠜⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿
+⣿⣿⣿⣿⠿⠿⠛⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠉⠻⣿⣿⣿⣿⣿
+⣿⣿⡏⠁⠀⠀⠀⠀⠀⣀⣠⣤⣤⣶⣶⣶⣶⣶⣦⣤⡄⠀⠀⠀⠀⢀⣴⣿⣿⣿⣿⣿
+⣿⣿⣷⣄⠀⠀⠀⢠⣾⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⢿⡧⠇⢀⣤⣶⣿⣿⣿⣿⣿⣿⣿
+⣿⣿⣿⣿⣿⣿⣾⣮⣭⣿⡻⣽⣒⠀⣤⣜⣭⠐⢐⣒⠢⢰⢸⣿⣿⣿⣿⣿⣿⣿⣿⣿
+⣿⣿⣿⣿⣿⣿⣿⣏⣿⣿⣿⣿⣿⣿⡟⣾⣿⠂⢈⢿⣷⣞⣸⣿⣿⣿⣿⣿⣿⣿⣿⣿
+⣿⣿⣿⣿⣿⣿⣿⣿⣽⣿⣿⣷⣶⣾⡿⠿⣿⠗⠈⢻⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿
+⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⡿⠻⠋⠉⠑⠀⠀⢘⢻⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿
+⣿⣿⣿⣿⣿⣿⣿⡿⠟⢹⣿⣿⡇⢀⣶⣶⠴⠶⠀⠀⢽⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿
+⣿⣿⣿⣿⣿⣿⡿⠀⠀⢸⣿⣿⠀⠀⠣⠀⠀⠀⠀⠀⡟⢿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿
+⣿⣿⣿⡿⠟⠋⠀⠀⠀⠀⠹⣿⣧⣀⠀⠀⠀⠀⡀⣴⠁⢘⡙⢿⣿⣿⣿⣿⣿⣿⣿⣿
+⠉⠉⠁⠀⠀⠀⠀⠀⠀⠀⠀⠈⠙⢿⠗⠂⠄⠀⣴⡟⠀⠀⡃⠀⠉⠉⠟⡿⣿⣿⣿⣿
+⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢷⠾⠛⠂⢹⠀⠀⠀⢡⠀⠀⠀⠀⠀⠙⠛⠿⢿
+ART_EOF
+
+echo ">>> It's time to cook."
+echo ">>> Username: $USERNAME"
+echo ">>> Desktop:  $UI_NAME"
+echo ">>> ---------------------------------------------------"
+
+OUTPUT_IMG="ubuntu_beryllium.img"
+UBUNTU_RELEASE="noble"
+NEW_USER="$USERNAME"
+NEW_PASS="$PASSWORD"
+UI_TO_INSTALL="$UI_PKG"
+
+smart_mount() {
+    local IMG=\$1
+    local MNT_DIR=\$2
+    sudo losetup -D
+    LOOP_DEV=\$(sudo losetup --partscan --show -f "\$IMG")
+    sleep 2
+    if [ -b "\${LOOP_DEV}p2" ]; then TARGET_PART="\${LOOP_DEV}p2"; else TARGET_PART="\${LOOP_DEV}p1"; fi
+    sudo mount -o ro "\${TARGET_PART}" "\$MNT_DIR"
+}
+
+smart_unmount() {
+    sudo umount -l "\$1" || true
+    sudo losetup -D
+}
+
+echo ">>> [Phase 0] Fetching upstream images..."
+PMOS_BASE_URL="https://images.postmarketos.org/bpo/edge/xiaomi-beryllium/plasma-mobile/"
+LATEST_PMOS_DIR=\$(curl -s \$PMOS_BASE_URL | grep -oP 'href="\K[0-9-]+/(?=")' | head -n 1)
+PMOS_FULL_URL="\${PMOS_BASE_URL}\${LATEST_PMOS_DIR}"
+LATEST_PMOS_ROOT=\$(curl -s \$PMOS_FULL_URL | grep -oP 'href="\K[^"]+-xiaomi-beryllium-tianma\.img\.xz(?=")' | head -n 1)
+LATEST_PMOS_BOOT=\$(curl -s \$PMOS_FULL_URL | grep -oP 'href="\K[^"]+-xiaomi-beryllium-tianma-boot\.img\.xz(?=")' | head -n 1)
+wget -q --show-progress "\${PMOS_FULL_URL}\${LATEST_PMOS_ROOT}" -O pmos_temp.img.xz
+wget -q --show-progress "\${PMOS_FULL_URL}\${LATEST_PMOS_BOOT}" -O pmos_boot.img.xz
+
+MOBIAN_BASE_URL="https://images.mobian.org/qcom/weekly/"
+LATEST_MOBIAN_FILE=\$(curl -s \$MOBIAN_BASE_URL | grep -oP 'href="\Kmobian-(sdm845|qcom)-phosh-[0-9]+\.tar\.xz(?=")' | head -n 1)
+wget -q --show-progress "\${MOBIAN_BASE_URL}\${LATEST_MOBIAN_FILE}" -O mobian_temp.tar.xz
+
+xz -d pmos_temp.img.xz
+xz -d pmos_boot.img.xz
+tar -xf mobian_temp.tar.xz
+MOB_RAW=\$(ls mobian-*.rootfs.img | head -n 1)
+
+if file "pmos_temp.img" | grep -q "Android sparse image"; then
+    simg2img pmos_temp.img pmos_final.img
+    rm pmos_temp.img
+else
+    mv pmos_temp.img pmos_final.img
+fi
+
+# --- Phase 1: Harvesting ---
+mkdir -p mnt_pmos pmos_harvest mnt_mobian mobian_harvest
+smart_mount "pmos_final.img" "mnt_pmos"
+cp -r mnt_pmos/lib/modules/ pmos_harvest/
+cp -r mnt_pmos/lib/firmware/ pmos_harvest/
+smart_unmount "mnt_pmos"
+
+smart_mount "\$MOB_RAW" "mnt_mobian"
+cp -r mnt_mobian/usr/share/alsa/ucm2/ mobian_harvest/
+cp -r mnt_mobian/etc/ModemManager/ mobian_harvest/
+cp -r mnt_mobian/lib/udev/rules.d/ mobian_harvest/
+smart_unmount "mnt_mobian"
+
+# --- Phase 2: Ubuntu Rootfs ---
+sudo debootstrap --arch=arm64 --foreign \$UBUNTU_RELEASE ubuntu_rootfs http://ports.ubuntu.com/
+sudo cp /usr/bin/qemu-aarch64-static ubuntu_rootfs/usr/bin/
+sudo chroot ubuntu_rootfs /debootstrap/debootstrap --second-stage
+
+# --- Phase 3: Merging ---
+sudo cp -r pmos_harvest/modules/* ubuntu_rootfs/lib/modules/
+sudo cp -r pmos_harvest/firmware/* ubuntu_rootfs/lib/firmware/
+sudo cp -r mobian_harvest/ucm2/* ubuntu_rootfs/usr/share/alsa/ucm2/
+sudo mkdir -p ubuntu_rootfs/etc/ModemManager/
+sudo cp -r mobian_harvest/ModemManager/* ubuntu_rootfs/etc/ModemManager/
+sudo cp -r mobian_harvest/rules.d/* ubuntu_rootfs/lib/udev/rules.d/
+
+# --- Phase 4: Chroot Setup ---
+sudo chroot ubuntu_rootfs /bin/bash << CHROOT_EOF
+echo "nameserver 8.8.8.8" > /etc/resolv.conf
+useradd -m -s /bin/bash \$NEW_USER
+echo "\$NEW_USER:\$NEW_PASS" | chpasswd
+usermod -aG sudo,video,audio,plugdev \$NEW_USER
+apt-get update && apt-get upgrade -y
+export DEBIAN_FRONTEND=noninteractive
+apt-get install -y \$UI_TO_INSTALL modemmanager network-manager systemd-resolved
+echo "/usr/sbin/lightdm" > /etc/X11/default-display-manager
+dpkg-reconfigure lightdm
+CHROOT_EOF
+
+# --- Phase 5: Final Image ---
+dd if=/dev/zero of=\$OUTPUT_IMG bs=1M count=6144
+mkfs.ext4 -L pmOS_root \$OUTPUT_IMG
+mkdir -p mnt_final
+sudo mount -o loop \$OUTPUT_IMG mnt_final/
+sudo cp -a ubuntu_rootfs/. mnt_final/
+sudo umount mnt_final
+
+rm -rf mnt_pmos pmos_harvest mnt_mobian mobian_harvest ubuntu_rootfs mnt_final
+rm -f pmos_final.img mobian_temp.tar.xz pmos_temp.img pmos_boot.img.xz \$MOB_RAW
+echo ">>> DONE! Final image: \$OUTPUT_IMG"
+EOF
+
+# 3. Generate Wrappers
+cat << EOF > 1_start_box.sh
+#!/bin/bash
+CMD="$ENGINE"
+sudo \$CMD build -t beryllium-cooker .
+sudo \$CMD rm -f my-rom-cooker 2>/dev/null || true
+sudo \$CMD run -d --privileged --name my-rom-cooker -v "\$(pwd):/cooker" beryllium-cooker
+echo "Container Ready using \$CMD."
+EOF
+
+cat << EOF > 2_build_rom.sh
+#!/bin/bash
+CMD="$ENGINE"
+sudo \$CMD exec -it my-rom-cooker bash -c "chmod +x cook_beryllium.sh && ./cook_beryllium.sh"
+EOF
+
+chmod +x 1_start_box.sh 2_build_rom.sh deploy_workspace.sh
+echo "Workspace deployed. Run 'bash 1_start_box.sh' to begin."
+DEPLOY_EOF
+
+chmod +x deploy_workspace.sh
