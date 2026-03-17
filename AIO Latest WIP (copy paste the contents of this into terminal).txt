@@ -1,0 +1,545 @@
+cat << 'DEPLOY_EOF' > deploy_workspace.sh
+#!/bin/bash
+set -e
+
+echo "======================================================="
+echo "   ROM Cooker - Modular Workspace Generator"
+echo "======================================================="
+echo ">>> Generating independent scripts..."
+echo ""
+
+# ==============================================================================
+#                      START OF SCRIPT 1: PREFLIGHT
+# ==============================================================================
+
+cat << 'EOF_1' > 1_preflight.sh
+#!/bin/bash
+set -e
+echo "======================================================="
+echo "   [1/6] Pre-Flight & Workspace Setup"
+echo "======================================================="
+
+echo ">>> Checking and installing host dependencies..."
+sudo apt-get update
+sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+    debootstrap qemu-user-static qemu-system-aarch64 sudo e2fsprogs curl wget \
+    xz-utils gzip zip ca-certificates file fdisk git python3 \
+    python3-pip python3-venv sshpass tar kpartx dosfstools binfmt-support
+
+echo "======================================================="
+echo "   Configuration Prompts"
+echo "======================================================="
+read -p "Enter desired username [default: ubuntu]: " USERNAME
+USERNAME=${USERNAME:-ubuntu}
+
+read -s -p "Enter desired password [default: ubuntu]: " PASSWORD
+echo ""
+PASSWORD=${PASSWORD:-ubuntu}
+
+echo "Select Desktop UI:"
+echo "1) Lomiri (Ubuntu Touch experience)"
+echo "2) XFCE (Lightweight, best for performance)"
+echo "3) GNOME (Modern, heavy, tablet-friendly)"
+echo "4) Custom (Provide your own core package names)"
+read -p "Choice [1-4, default 1]: " UI_CHOICE
+
+case $UI_CHOICE in
+    2) UI_PKG="xfce4 xfce4-goodies xorg"; UI_NAME="xfce" ;;
+    3) UI_PKG="ubuntu-desktop-minimal"; UI_NAME="gnome" ;;
+    4) 
+       read -p "Enter full core package name(s) (e.g., kde-standard): " CUSTOM_PKG
+       UI_PKG="$CUSTOM_PKG xorg lightdm"
+       UI_NAME="custom"
+       ;;
+    *) UI_PKG="lomiri-desktop-session mir-graphics-drivers-desktop"; UI_NAME="lomiri" ;;
+esac
+
+echo ""
+read -p "Enter desired RootFS image size in GB (Minimum 8) [default: 8]: " IMG_INPUT
+IMG_INPUT=${IMG_INPUT:-8}
+if [ "$IMG_INPUT" -lt 8 ]; then
+    echo ">>> Forcing minimum size of 8GB."
+    IMAGE_SIZE=8
+else
+    IMAGE_SIZE=$IMG_INPUT
+fi
+
+echo ""
+read -p "Enter any EXTRA packages to install (space separated) [default: none]: " EXTRA_PKG
+EXTRA_PKG=${EXTRA_PKG:-}
+
+cat << EOF_ENV > build.env
+USERNAME="$USERNAME"
+PASSWORD="$PASSWORD"
+UI_PKG="$UI_PKG"
+UI_NAME="$UI_NAME"
+EXTRA_PKG="$EXTRA_PKG"
+IMAGE_SIZE="$IMAGE_SIZE"
+UBUNTU_RELEASE="noble"
+FIRMWARE_STASH="\$HOME/firmware_stash"
+EOF_ENV
+
+echo ">>> Configuration locked and saved to build.env."
+echo ">>> Pre-flight complete. Proceed to Script 2."
+EOF_1
+
+# ==============================================================================
+#                      START OF SCRIPT 2: PMOS SETUP
+# ==============================================================================
+
+cat << 'EOF_2' > 2_pmos_setup.sh
+#!/bin/bash
+set -e
+source build.env
+
+echo "======================================================="
+echo "   [2/6] pmbootstrap Initialization & Generation"
+echo "======================================================="
+
+echo ">>> Pulling latest pmbootstrap from upstream Git..."
+mkdir -p "$HOME/.local/src" "$HOME/.local/bin"
+if [ ! -d "$HOME/.local/src/pmbootstrap" ]; then
+    git clone https://gitlab.postmarketos.org/postmarketOS/pmbootstrap.git "$HOME/.local/src/pmbootstrap"
+fi
+ln -sf "$HOME/.local/src/pmbootstrap/pmbootstrap.py" "$HOME/.local/bin/pmbootstrap"
+export PATH="$HOME/.local/bin:$PATH"
+
+DEFAULT_WORK="$HOME/.local/var/pmbootstrap"
+if [ -f "$HOME/.config/pmbootstrap.cfg" ]; then
+    PM_WORK_DIR=$(pmbootstrap config work 2>/dev/null || echo "$DEFAULT_WORK")
+else
+    PM_WORK_DIR="$DEFAULT_WORK"
+fi
+
+echo "======================================================="
+echo "   ATTENTION: MANUAL CONFIGURATION REQUIRED"
+echo "======================================================="
+echo "You are about to enter the interactive pmbootstrap init phase."
+echo ""
+echo "CRITICAL INSTRUCTIONS:"
+echo "1. Work path: Use the default ($PM_WORK_DIR) or provide your own."
+echo "2. Channel: Choose 'edge'."
+echo "3. Vendor: Choose 'xiaomi'."
+echo "4. Device: Choose 'beryllium'."
+echo "5. Display/Kernel: Choose 'tianma' or 'ebbg' depending on your panel."
+echo "6. User interface: Choose 'none'."
+echo "7. Init system: You MUST choose 'systemd'."
+echo "======================================================="
+read -p "Press ENTER when you understand and are ready to begin..."
+
+pmbootstrap init
+echo ">>> Triggering pmbootstrap rootfs generation..."
+pmbootstrap install
+
+PM_WORK_DIR=$(pmbootstrap config work)
+PMOS_CHROOT_PATH="$PM_WORK_DIR/chroot_rootfs_xiaomi-beryllium"
+
+echo ">>> Verifying final pmbootstrap chroot generation..."
+if [ -d "$PMOS_CHROOT_PATH/lib/modules" ]; then
+    echo ">>> pmOS Chroot successfully verified!"
+    
+    rm -f pmos_harvest
+    ln -s "$PMOS_CHROOT_PATH" pmos_harvest
+    
+    echo ">>> Exporting Android-compatible boot image for fastboot..."
+    pmbootstrap export
+    cp /tmp/postmarketOS-export/boot.img pmos_boot.img
+    
+    echo ">>> System linked. Proceed to Script 3 (Firmware Fetcher)."
+else
+    echo ">>> [ERROR] Could not find the generated pmOS chroot at $PMOS_CHROOT_PATH."
+    exit 1
+fi
+EOF_2
+
+# ==============================================================================
+#                      START OF SCRIPT 3: FIRMWARE FETCHER
+# ==============================================================================
+
+cat << 'EOF_3' > 3_firmware_fetcher.sh
+#!/bin/bash
+set -e
+source build.env
+
+echo "======================================================="
+echo "   [3/6] Firmware Fetcher (Mobian Extraction)"
+echo "======================================================="
+
+if [ -d "$FIRMWARE_STASH" ] && [ "$(ls -A $FIRMWARE_STASH 2>/dev/null)" ]; then
+    echo ">>> Found existing firmware stash at $FIRMWARE_STASH. Skipping network fetch."
+else
+    echo ">>> Local firmware stash is empty."
+    echo ">>> Please ensure your Poco F1 is powered on, connected to Wi-Fi,"
+    echo ">>> and actively running Mobian."
+    echo ""
+    read -p "Enter Poco F1 IP Address (e.g., 192.168.1.50): " PHONE_IP
+    read -p "Enter Mobian username [default: mobian]: " PHONE_USER
+    PHONE_USER=${PHONE_USER:-mobian}
+    read -s -p "Enter Mobian password: " PHONE_PASS
+    echo ""
+    
+    echo ">>> [Phone Side] Archiving hardware profiles via SSH..."
+    sshpass -p "$PHONE_PASS" ssh -o StrictHostKeyChecking=no "$PHONE_USER@$PHONE_IP" \
+        "echo '$PHONE_PASS' | sudo -S tar -czpf ~/mobian_harvest.tar.gz /usr/share/alsa/ucm2/ /etc/ModemManager/ /lib/udev/rules.d/"
+    
+    echo ">>> [Host Side] Downloading the archive..."
+    mkdir -p "$FIRMWARE_STASH"
+    sshpass -p "$PHONE_PASS" scp -o StrictHostKeyChecking=no "$PHONE_USER@$PHONE_IP:~/mobian_harvest.tar.gz" "$FIRMWARE_STASH/raw_harvest.tar.gz"
+    
+    echo ">>> [Host Side] Extracting into stash..."
+    tar -xzpf "$FIRMWARE_STASH/raw_harvest.tar.gz" -C "$FIRMWARE_STASH/"
+    rm "$FIRMWARE_STASH/raw_harvest.tar.gz"
+    
+    echo ">>> [Phone Side] Cleaning up temporary files..."
+    sshpass -p "$PHONE_PASS" ssh -o StrictHostKeyChecking=no "$PHONE_USER@$PHONE_IP" "rm ~/mobian_harvest.tar.gz"
+fi
+
+echo ">>> [Host Side] Zipping firmware stash for later upload/distribution..."
+if [ ! -f "$HOME/beryllium_mobian_firmware.zip" ]; then
+    cd "$FIRMWARE_STASH" && zip -r "$HOME/beryllium_mobian_firmware.zip" ./* && cd - > /dev/null
+    echo ">>> Portable zip backup created at $HOME/beryllium_mobian_firmware.zip"
+else
+    echo ">>> Zip backup already exists at $HOME/beryllium_mobian_firmware.zip"
+fi
+
+echo ">>> Firmware successfully stashed and secured."
+echo ">>> Proceed to Script 4 (The Transplant)."
+EOF_3
+
+# ==============================================================================
+#                      START OF SCRIPT 4: THE TRANSPLANT & ESP SEAL
+# ==============================================================================
+
+cat << 'EOF_4' > 4_the_transplant.sh
+#!/bin/bash
+set -e
+source build.env
+
+echo "======================================================="
+echo "   [4/6] The Transplant (Base Build & UEFI Prep)"
+echo "======================================================="
+echo ">>> Target: Beryllium | User: $USERNAME | UI: $UI_NAME"
+echo ">>> Image Size: ${IMAGE_SIZE}GB"
+echo ">>> ---------------------------------------------------"
+
+SKIP_SETUP="no"
+
+# --- Debootstrap Phase ---
+if [ ! -d "Ubuntu-Beryllium" ]; then
+    echo ">>> [Debootstrap] Building Ubuntu $UBUNTU_RELEASE (arm64)..."
+    sudo debootstrap --arch=arm64 --foreign "$UBUNTU_RELEASE" Ubuntu-Beryllium http://ports.ubuntu.com/
+    sudo cp /usr/bin/qemu-aarch64-static Ubuntu-Beryllium/usr/bin/
+    sudo chroot Ubuntu-Beryllium /debootstrap/debootstrap --second-stage
+else
+    echo ">>> [Debootstrap] Ubuntu-Beryllium already exists, skipping base generation."
+    echo ""
+    read -p ">>> Do you want to re-run the repository, UI, and user setup phase? (y/n) [default: n]: " RUN_SETUP
+    RUN_SETUP=${RUN_SETUP:-n}
+    if [ "$RUN_SETUP" != "y" ]; then
+        SKIP_SETUP="yes"
+    fi
+fi
+
+# --- Injection Phase ---
+echo ">>> [Merge] Injecting pmOS kernels & firmware..."
+sudo cp -a pmos_harvest/lib/modules/. Ubuntu-Beryllium/lib/modules/
+sudo cp -a pmos_harvest/lib/firmware/. Ubuntu-Beryllium/lib/firmware/
+
+# --- UEFI Boot Payload Extraction ---
+echo ">>> [Extract] Pulling raw kernel (vmlinuz), initramfs, and DTBs for UEFI/EDK2..."
+mkdir -p uefi_boot_payload
+if ls pmos_harvest/boot/vmlinuz* 1> /dev/null 2>&1; then
+    sudo cp -L pmos_harvest/boot/vmlinuz* uefi_boot_payload/
+    sudo cp -L pmos_harvest/boot/initramfs* uefi_boot_payload/
+    
+    if [ -d "pmos_harvest/boot/dtbs" ]; then
+        sudo cp -Lr pmos_harvest/boot/dtbs uefi_boot_payload/
+    fi
+    sudo chown -R $(whoami):$(whoami) uefi_boot_payload/
+    echo ">>> Raw UEFI boot files successfully extracted."
+else
+    echo ">>> [WARNING] No vmlinuz found in pmos_harvest/boot/. Could not extract raw files."
+fi
+
+echo ">>> [Merge] Injecting stashed Mobian hardware profiles..."
+if [ -d "$FIRMWARE_STASH/usr/share/alsa/ucm2" ]; then
+    sudo mkdir -p Ubuntu-Beryllium/usr/share/alsa/ucm2/
+    sudo cp -a "$FIRMWARE_STASH/usr/share/alsa/ucm2/." Ubuntu-Beryllium/usr/share/alsa/ucm2/ || true
+fi
+if [ -d "$FIRMWARE_STASH/etc/ModemManager" ]; then
+    sudo mkdir -p Ubuntu-Beryllium/etc/ModemManager/
+    sudo cp -a "$FIRMWARE_STASH/etc/ModemManager/." Ubuntu-Beryllium/etc/ModemManager/ || true
+fi
+if [ -d "$FIRMWARE_STASH/lib/udev/rules.d" ]; then
+    sudo mkdir -p Ubuntu-Beryllium/lib/udev/rules.d/
+    sudo cp -a "$FIRMWARE_STASH/lib/udev/rules.d/." Ubuntu-Beryllium/lib/udev/rules.d/ || true
+fi
+
+# --- Setup Phase ---
+if [ "$SKIP_SETUP" == "no" ]; then
+    echo ">>> [Config] Expanding repositories, installing UI, user, and GRUB EFI..."
+    sudo chroot Ubuntu-Beryllium /bin/bash << CHROOT_EOF
+echo "nameserver 8.8.8.8" > /etc/resolv.conf
+
+cat << APT_EOF > /etc/apt/sources.list
+deb http://ports.ubuntu.com/ubuntu-ports/ $UBUNTU_RELEASE main restricted universe multiverse
+deb http://ports.ubuntu.com/ubuntu-ports/ $UBUNTU_RELEASE-updates main restricted universe multiverse
+deb http://ports.ubuntu.com/ubuntu-ports/ $UBUNTU_RELEASE-security main restricted universe multiverse
+deb http://ports.ubuntu.com/ubuntu-ports/ $UBUNTU_RELEASE-backports main restricted universe multiverse
+APT_EOF
+
+# Only create user if it doesn't exist
+if ! id "$USERNAME" &>/dev/null; then
+    useradd -m -s /bin/bash $USERNAME
+    echo "$USERNAME:$PASSWORD" | chpasswd
+    usermod -aG sudo,video,audio,plugdev $USERNAME
+fi
+
+apt-get update && apt-get upgrade -y
+export DEBIAN_FRONTEND=noninteractive
+apt-get install -y $UI_PKG $EXTRA_PKG modemmanager network-manager systemd-resolved grub-efi-arm64-bin
+echo "/usr/sbin/lightdm" > /etc/X11/default-display-manager 2>/dev/null || true
+dpkg-reconfigure lightdm 2>/dev/null || true
+
+# Generate monolithic GRUB EFI binary
+grub-mkimage -o /BOOTAA64.EFI -O arm64-efi -p /EFI/BOOT \
+    fat ext2 part_gpt normal linux all_video boot configfile search search_fs_file search_fs_uuid search_label minicmd
+
+# Inject custom bash prompt for chroot safety
+cat << 'BASHRC_EOF' >> /root/.bashrc
+export PS1="\[\033[01;31m\][Ubuntu-Beryllium]\[\033[00m\] \[\033[01;34m\]\w\[\033[00m\]# "
+BASHRC_EOF
+CHROOT_EOF
+else
+    echo ">>> [Config] Skipping repository, UI, and user setup phase as requested..."
+fi
+
+# --- ESP Staging Phase ---
+echo ">>> [ESP Prep] Checking for UEFI payload files..."
+KERNEL_FILE=$(ls uefi_boot_payload/vmlinuz* 2>/dev/null | head -n 1 || true)
+INITRD_FILE=$(ls uefi_boot_payload/initramfs* 2>/dev/null | head -n 1 || true)
+
+if [ -z "$KERNEL_FILE" ] || [ -z "$INITRD_FILE" ]; then
+    echo ">>> [ERROR] Missing vmlinuz or initramfs in uefi_boot_payload/!"
+    echo ">>> Check your pmOS generation. Halting to prevent broken bootloader."
+    exit 1
+fi
+
+KNAME=$(basename "$KERNEL_FILE")
+INAME=$(basename "$INITRD_FILE")
+
+echo ">>> [ESP Prep] Assembling unsealed ESP folder..."
+mkdir -p esp_folder/EFI/BOOT
+if [ -f "Ubuntu-Beryllium/BOOTAA64.EFI" ]; then
+    sudo cp Ubuntu-Beryllium/BOOTAA64.EFI esp_folder/EFI/BOOT/
+else
+    echo ">>> [WARNING] BOOTAA64.EFI not found in chroot. You may need to run the setup phase."
+fi
+
+cp "$KERNEL_FILE" esp_folder/
+cp "$INITRD_FILE" esp_folder/
+if [ -d "uefi_boot_payload/dtbs" ]; then
+    cp -r uefi_boot_payload/dtbs esp_folder/
+fi
+
+cat << GRUB_EOF > esp_folder/EFI/BOOT/grub.cfg
+set timeout=3
+menuentry "Ubuntu (Beryllium UEFI)" {
+    linux /$KNAME root=/dev/sda2 rw rootwait console=tty0
+    initrd /$INAME
+    # WARNING: Adjust the devicetree path below to match your specific dtb file in the dtbs/ folder!
+    devicetree /dtbs/qcom/sdm845-xiaomi-beryllium.dtb
+}
+GRUB_EOF
+
+sudo chown -R $(whoami):$(whoami) esp_folder
+
+echo ""
+echo "======================================================="
+echo "   ACTION REQUIRED: ESP FOLDER READY FOR MODIFICATION"
+echo "======================================================="
+echo "An unsealed ESP directory has been generated at: ./esp_folder/"
+echo "Please verify your kernel files and edit ./esp_folder/EFI/BOOT/grub.cfg"
+echo "to ensure the 'devicetree' path exactly matches the .dtb file."
+echo ""
+read -p "Press ENTER when you are done making changes to seal the ESP image..."
+
+# --- Sealing the ESP ---
+echo ">>> [ESP Seal] Generating 128MB FAT32 esp.img..."
+dd if=/dev/zero of=esp.img bs=1M count=128 status=none
+mkfs.vfat -F 32 esp.img
+mkdir -p mnt_esp
+sudo mount -o loop esp.img mnt_esp/
+sudo cp -r esp_folder/* mnt_esp/
+sudo umount mnt_esp
+rm -rf mnt_esp
+
+echo ">>> ESP successfully sealed into esp.img!"
+echo ""
+echo "======================================================="
+echo "   Chroot Configuration Phase"
+echo "======================================================="
+echo "The base Ubuntu-Beryllium folder is fully populated and unsealed."
+echo "Do you want to seal the RootFS into an image right now,"
+echo "or continue making manual edits/configurations inside the chroot later?"
+echo ""
+echo "1) Seal it now (Generate final .img and flashing instructions)"
+echo "2) Leave it unsealed (I will make edits and seal it later)"
+read -p "Choice [1-2, default 2]: " CHROOT_CHOICE
+CHROOT_CHOICE=${CHROOT_CHOICE:-2}
+
+if [ "$CHROOT_CHOICE" == "1" ]; then
+    echo ">>> Proceeding to seal..."
+    bash 6_seal_rootfs.sh
+else
+    echo ">>> "
+    echo ">>> Chroot left open at ./Ubuntu-Beryllium"
+    echo ">>> To make edits later, run: bash 5_enter_chroot.sh"
+    echo ">>> When you are finished, run: bash 6_seal_rootfs.sh"
+    echo ">>> "
+    echo ">>> Phase 4 complete."
+fi
+EOF_4
+
+# ==============================================================================
+#                      START OF SCRIPT 5: ENTER CHROOT
+# ==============================================================================
+
+cat << 'EOF_5' > 5_enter_chroot.sh
+#!/bin/bash
+set -e
+
+echo "======================================================="
+echo "   [5/6] Enter Chroot Environment"
+echo "======================================================="
+if [ ! -d "Ubuntu-Beryllium" ]; then
+    echo ">>> [ERROR] Ubuntu-Beryllium directory not found. Have you run script 4?"
+    exit 1
+fi
+
+echo ">>> Mounting virtual filesystems..."
+sudo mount --bind /dev Ubuntu-Beryllium/dev
+sudo mount --bind /dev/pts Ubuntu-Beryllium/dev/pts
+sudo mount --bind /proc Ubuntu-Beryllium/proc
+sudo mount --bind /sys Ubuntu-Beryllium/sys
+
+echo ">>> Entering chroot as root. Type 'exit' to leave."
+echo "-------------------------------------------------------"
+sudo chroot Ubuntu-Beryllium /bin/bash
+echo "-------------------------------------------------------"
+
+echo ">>> Unmounting virtual filesystems..."
+sudo umount Ubuntu-Beryllium/dev/pts || true
+sudo umount Ubuntu-Beryllium/dev || true
+sudo umount Ubuntu-Beryllium/proc || true
+sudo umount Ubuntu-Beryllium/sys || true
+
+echo ">>> Exited successfully. Run 6_seal_rootfs.sh when you are ready to pack the image."
+EOF_5
+
+# ==============================================================================
+#                      START OF SCRIPT 6: SEAL ROOTFS
+# ==============================================================================
+
+cat << 'EOF_6' > 6_seal_rootfs.sh
+#!/bin/bash
+set -e
+source build.env
+
+echo "======================================================="
+echo "   [6/6] Finalizing and Sealing RootFS"
+echo "======================================================="
+if [ ! -d "Ubuntu-Beryllium" ]; then
+    echo ">>> [ERROR] Ubuntu-Beryllium directory not found."
+    exit 1
+fi
+
+OUTPUT_IMG="ubuntu_beryllium.img"
+
+# Ensure virtual filesystems aren't stuck mounted before packing
+sudo umount Ubuntu-Beryllium/dev/pts 2>/dev/null || true
+sudo umount Ubuntu-Beryllium/dev 2>/dev/null || true
+sudo umount Ubuntu-Beryllium/proc 2>/dev/null || true
+sudo umount Ubuntu-Beryllium/sys 2>/dev/null || true
+
+IMG_MB=$((IMAGE_SIZE * 1024))
+echo ">>> [Packing] Allocating ${IMAGE_SIZE}GB RootFS and packing..."
+dd if=/dev/zero of="$OUTPUT_IMG" bs=1M count=$IMG_MB status=progress
+mkfs.ext4 -L pmOS_root "$OUTPUT_IMG"
+mkdir -p mnt_final
+sudo mount -o loop "$OUTPUT_IMG" mnt_final/
+sudo cp -a Ubuntu-Beryllium/. mnt_final/
+sudo umount mnt_final
+sudo e2fsck -f -y "$OUTPUT_IMG"
+
+echo ">>> [Cleanup] RootFS sealed! The Ubuntu-Beryllium folder is no longer needed."
+read -p "Do you want to delete the unsealed Ubuntu-Beryllium folder to save space? (y/n) [default: y]: " DEL_CHROOT
+DEL_CHROOT=${DEL_CHROOT:-y}
+if [ "$DEL_CHROOT" == "y" ]; then
+    sudo rm -rf Ubuntu-Beryllium
+    echo ">>> Ubuntu-Beryllium deleted."
+fi
+
+echo ""
+echo "======================================================="
+echo "   Flashing & Deployment Options"
+echo "======================================================="
+read -p "How do you plan to flash? (1: SD Card, 2: Fastboot/Internal) [Default: 1]: " FLASH_CHOICE
+FLASH_CHOICE=${FLASH_CHOICE:-1}
+
+if [ "$FLASH_CHOICE" == "2" ]; then
+    echo ">>> [Fastboot Prep] Converting raw ext4/fat32 images to sparse images..."
+    if ! command -v img2simg &> /dev/null; then
+        sudo apt-get update && sudo apt-get install -y android-sdk-libsparse-utils || sudo apt-get install -y android-tools-fsutils
+    fi
+    
+    img2simg "$OUTPUT_IMG" "${OUTPUT_IMG%.img}_sparse.img"
+    if [ ! -f "esp_sparse.img" ] && [ -f "esp.img" ]; then
+        img2simg esp.img esp_sparse.img
+    fi
+    
+    echo ">>> "
+    echo ">>> LOCATION:"
+    echo ">>> Sealed ESP (Sparse): $(pwd)/esp_sparse.img"
+    echo ">>> RootFS (Sparse):     $(pwd)/${OUTPUT_IMG%.img}_sparse.img"
+    echo ">>> "
+    echo ">>> FLASHING INSTRUCTIONS (Fastboot with UEFI):"
+    echo ">>> 1. Reboot your Beryllium into Fastboot mode."
+    echo ">>> 2. Flash the ESP sparse image (replace 'boot' with your target UEFI boot partition):"
+    echo ">>>    fastboot flash boot $(pwd)/esp_sparse.img"
+    echo ">>> "
+    echo ">>> 3. Flash the RootFS sparse image (e.g., to userdata):"
+    echo ">>>    fastboot flash userdata $(pwd)/${OUTPUT_IMG%.img}_sparse.img"
+    echo ">>> "
+    echo ">>> 4. Reboot your device: fastboot reboot"
+else
+    echo ">>> "
+    echo ">>> LOCATION:"
+    echo ">>> Sealed ESP Image: $(pwd)/esp.img"
+    echo ">>> RootFS Image:     $(pwd)/$OUTPUT_IMG"
+    echo ">>> "
+    echo ">>> FLASHING INSTRUCTIONS (SD Card for UEFI):"
+    echo ">>> Note: For UEFI booting from SD, you must manually create a GPT partition table"
+    echo ">>> with a FAT32 ESP (Partition 1) and ext4 RootFS (Partition 2)."
+    echo ">>> "
+    echo ">>> 1. Flash the ESP to Partition 1:"
+    echo ">>>    sudo dd if=$(pwd)/esp.img of=/dev/sdX1 bs=4M status=progress"
+    echo ">>> "
+    echo ">>> 2. Flash the RootFS to Partition 2:"
+    echo ">>>    sudo dd if=$(pwd)/$OUTPUT_IMG of=/dev/sdX2 bs=4M status=progress"
+fi
+echo "======================================================="
+EOF_6
+
+# ==============================================================================
+#                      END OF SCRIPT GENERATION
+# ==============================================================================
+
+# Make everything executable
+chmod +x 1_preflight.sh 2_pmos_setup.sh 3_firmware_fetcher.sh 4_the_transplant.sh 5_enter_chroot.sh 6_seal_rootfs.sh
+
+echo ">>> Workspace scripts generated successfully!"
+echo ">>> Run 'bash 1_preflight.sh' to begin the process."
+DEPLOY_EOF
+
+bash deploy_workspace.sh
