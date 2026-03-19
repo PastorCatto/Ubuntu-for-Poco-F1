@@ -1,7 +1,13 @@
 # Ubuntu-for-Poco-F1
-This is just a base repo for me to upload and keep track of my progress of porting Ubuntu 24.04 and later verisons to the Poco F1
-im also planning on releasing a docker image that has all the tools self-contained for those not running on a Ubuntu Host.
-More Coming soon! 
-DISCLAIMER: I am using generative ai to help assist me in creating the scripts and also getting this port functional as a POC (Proof Of Concept!)
-but that is all i intend on doing, once theres a POC, ill wish to transition away from the AI generated scripts (for more human ones!) 
-Always happy to accept worthy commits!
+So.... i got bored, asked ai to help me with a dumb idea i had, and now we're here.	
+
+currently testing hijacking the pmOS boot image with it finding and loading custom kernels and rootFS, and should it boot, we have a ubuntu rootfs!
+
+i debated U-boot (will look into in the future)
+
+also debated UEFI (shoutout Windows On Arm Projects! and Fedora Pocketblue!)
+
+as it stands, postmarketOS has the best support (shoutout to them btw!) 
+will report back with updates, use this repo as a sort of "progression over time" as ill re-make a whole new repo once i have a booting platform
+
+I HAVE NOT GIVEN UP HOPE! I WANT TO GET IT BOOTING!
