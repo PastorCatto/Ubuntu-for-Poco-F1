@@ -10,6 +10,6 @@ also debated UEFI (shoutout Windows On Arm Projects! and Fedora Pocketblue!)
 as it stands, postmarketOS has the best support (shoutout to them btw!) 
 will report back with updates, use this repo as a sort of "progression over time" as ill re-make a whole new repo once i have a booting platform
 
-EDIT: IT BOOTS! 
+EDIT: IT BOOTS! NEW REPO UP! CHECK MY PROFILE
 
 I HAVE NOT GIVEN UP HOPE! I WANT TO GET IT BOOTING!
